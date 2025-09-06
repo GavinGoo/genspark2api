@@ -10,14 +10,15 @@ import (
 	"genspark2api/common/config"
 	logger "genspark2api/common/loggger"
 	"genspark2api/model"
-	"github.com/deanxv/CycleTLS/cycletls"
-	"github.com/gin-gonic/gin"
-	"github.com/samber/lo"
 	"io"
 	"io/ioutil"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/deanxv/CycleTLS/cycletls"
+	"github.com/gin-gonic/gin"
+	"github.com/samber/lo"
 )
 
 const (
@@ -597,7 +598,10 @@ func handleMessageFieldDelta(c *gin.Context, event map[string]interface{}, respo
 	// 基础允许列表（所有配置下都需要处理的字段）
 	baseAllowed := fieldName == "session_state.answer" ||
 		strings.Contains(fieldName, "session_state.streaming_detail_answer") ||
-		fieldName == "session_state.streaming_markmap"
+		fieldName == "session_state.streaming_markmap" ||
+		fieldName == "session_state.streaming_detail_answer[1]" ||
+		(strings.HasPrefix(fieldName, "session_state.streaming_detail_answer[") &&
+			strings.HasSuffix(fieldName, "]")) // 兜底策略
 
 	// 需要显示思考过程时需要额外处理的字段
 	if config.ReasoningHide != 1 {
@@ -614,7 +618,7 @@ func handleMessageFieldDelta(c *gin.Context, event map[string]interface{}, respo
 	// 获取 delta 内容
 	var delta string
 	switch {
-	case (modelName == "o1" || modelName == "o3-mini-high") && fieldName == "session_state.answer":
+	case (modelName == "o1" || modelName == "o3-mini-high" || modelName == "o3-pro" || modelName == "o4-mini-high") && fieldName == "session_state.answer":
 		delta, _ = event["field_value"].(string)
 	default:
 		delta, _ = event["delta"].(string)

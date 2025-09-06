@@ -703,7 +703,7 @@ func handleMessageFieldDelta(c *gin.Context, event map[string]interface{}, respo
 				continue
 			}
 
-			searchContent := fmt.Sprintf("> [%s](%s)\n", title, link)
+			searchContent := fmt.Sprintf("\n> [%s](%s)\n", title, link)
 			if err := sendSSEvent(c, createResponse(searchContent)); err != nil {
 				return err
 			}

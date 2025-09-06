@@ -589,7 +589,7 @@ func createStreamResponse(responseId, modelName string, jsonData []byte, delta m
 }
 
 // handleMessageFieldDelta 处理消息字段增量
-func handleMessageFieldDelta(c *gin.Context, event map[string]interface{}, responseId, modelName string, jsonData []byte) error {
+func handleMessageFieldDelta(c *gin.Context, event map[string]interface{}, responseId, modelName string, jsonData []byte, searchModel bool) error {
 	fieldName, ok := event["field_name"].(string)
 	if !ok {
 		return nil
@@ -611,7 +611,14 @@ func handleMessageFieldDelta(c *gin.Context, event map[string]interface{}, respo
 			fieldName == "session_state.answerthink_is_finished"
 	}
 
+	// 联网搜索
+	if searchModel {
+		baseAllowed = baseAllowed ||
+			fieldName == "session_state.search_status_top_bar_data"
+	}
+
 	if !baseAllowed {
+		logger.Debugf(c.Request.Context(), fmt.Sprintf("忽略 field_name: %s", fieldName))
 		return nil
 	}
 
@@ -620,6 +627,9 @@ func handleMessageFieldDelta(c *gin.Context, event map[string]interface{}, respo
 	switch {
 	case (modelName == "o1" || modelName == "o3-mini-high" || modelName == "o3-pro" || modelName == "o4-mini-high") && fieldName == "session_state.answer":
 		delta, _ = event["field_value"].(string)
+	// 联网搜索
+	// case strings.Contains(fieldName, "session_state.streaming_detail_answer"):
+	// 	delta, _ = event["delta"].(string)
 	default:
 		delta, _ = event["delta"].(string)
 	}
@@ -648,6 +658,55 @@ func handleMessageFieldDelta(c *gin.Context, event map[string]interface{}, respo
 			err = sendSSEvent(c, createResponse("<think>\n"))
 		case "session_state.answerthink_is_finished":
 			err = sendSSEvent(c, createResponse("\n</think>"))
+		}
+	}
+
+	// 联网搜索
+	if searchModel && fieldName == "session_state.search_status_top_bar_data" {
+		// 定义搜索结果的结构体
+		type SearchResult struct {
+			Title   string `json:"title"`
+			Link    string `json:"link"`
+			Snippet string `json:"snippet"`
+		}
+
+		type SearchResponse struct {
+			SearchResults []SearchResult `json:"search_results"`
+		}
+
+		fieldValue, ok := event["field_value"].(map[string]interface{})
+		if !ok {
+			// return fmt.Errorf("field_value is not a map")
+			return nil
+		}
+
+		searchResults, ok := fieldValue["search_results"].([]interface{})
+		if !ok {
+			// return fmt.Errorf("search_results is not an array")
+			return nil
+		}
+
+		// 遍历搜索结果
+		for _, result := range searchResults {
+			resultMap, ok := result.(map[string]interface{})
+			if !ok {
+				continue // 跳过无效的结果
+			}
+
+			// 安全地获取标题和链接
+			title, ok := resultMap["title"].(string)
+			if !ok {
+				continue
+			}
+			link, ok := resultMap["link"].(string)
+			if !ok {
+				continue
+			}
+
+			searchContent := fmt.Sprintf("> [%s](%s)\n", title, link)
+			if err := sendSSEvent(c, createResponse(searchContent)); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -914,7 +973,8 @@ func handleStreamRequest(c *gin.Context, client cycletls.CycleTLS, cookie string
 					continue
 				}
 
-				logger.Debug(ctx, strings.TrimSpace(data))
+				// debug数据流
+				// logger.Debug(ctx, strings.TrimSpace(data))
 
 				switch {
 				case common.IsCloudflareChallenge(data):
@@ -1064,7 +1124,9 @@ func processStreamData(c *gin.Context, data string, projectId *string, cookie, r
 	//	return true
 	//}
 	data = strings.TrimPrefix(data, "data: ")
-	if !strings.HasPrefix(data, "{\"id\":") && !strings.HasPrefix(data, "{\"message_id\":") {
+	logger.Debug(c.Request.Context(), fmt.Sprintf("processStreamData: %s", data))
+	if !strings.HasPrefix(data, "{\"id\":") && !strings.HasPrefix(data, "{\"message_id\":") && !strings.Contains(data, "session_state.streaming_detail_answer") {
+		logger.Debug(c.Request.Context(), fmt.Sprintf("丢弃数据流: %s", data))
 		return true
 	}
 	var event map[string]interface{}
@@ -1083,13 +1145,14 @@ func processStreamData(c *gin.Context, data string, projectId *string, cookie, r
 	case "project_start":
 		*projectId, _ = event["id"].(string)
 	case "message_field":
-		if err := handleMessageFieldDelta(c, event, responseId, model, jsonData); err != nil {
+		if err := handleMessageFieldDelta(c, event, responseId, model, jsonData, searchModel); err != nil {
 			logger.Errorf(c.Request.Context(), "handleMessageFieldDelta err: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return false
 		}
 	case "message_field_delta":
-		if err := handleMessageFieldDelta(c, event, responseId, model, jsonData); err != nil {
+		logger.Debug(c.Request.Context(), "message_field_delta: ")
+		if err := handleMessageFieldDelta(c, event, responseId, model, jsonData, searchModel); err != nil {
 			logger.Errorf(c.Request.Context(), "handleMessageFieldDelta err: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return false
@@ -1122,12 +1185,13 @@ func makeStreamRequest(c *gin.Context, client cycletls.CycleTLS, jsonData []byte
 		Body:    string(jsonData),
 		Method:  "POST",
 		Headers: map[string]string{
-			"Content-Type": "application/json",
-			"Accept":       "text/event-stream",
-			"Origin":       baseURL,
-			"Referer":      baseURL + "/",
-			"Cookie":       cookie,
-			"User-Agent":   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome",
+			"Content-Type":    "application/json",
+			"Accept":          "text/event-stream",
+			"Origin":          baseURL,
+			"Referer":         baseURL + "/",
+			"Cookie":          cookie,
+			"User-Agent":      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome",
+			"Accept-language": "zh-CN,zh;q=0.9",
 		},
 	}
 

@@ -676,10 +676,12 @@ func handleSearchResults(c *gin.Context, event map[string]interface{}, responseI
 		}
 
 		searchContent := fmt.Sprintf("\n> [%s](%s)\n", title, link)
-		logger.Debugf(c.Request.Context(), fmt.Sprintf("搜索引用: %s", searchContent))
-		*searchStatus += searchContent
-		if err := sendSSEvent(c, createTempResponse(*searchStatus)); err != nil {
-			return err
+		if !strings.Contains(*searchStatus, searchContent) {
+			logger.Debugf(c.Request.Context(), fmt.Sprintf("搜索引用: %s", searchContent))
+			*searchStatus += searchContent
+			if err := sendSSEvent(c, createTempResponse(*searchStatus)); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -797,7 +799,7 @@ func handleMessageFieldDelta(c *gin.Context, event map[string]interface{}, respo
 		if delta != "" {
 			if strings.Contains(*searchStatus, "正在浏览") || strings.Contains(*searchStatus, "正在分析") {
 				// 正式输出前 清空一次内容
-				*searchStatus = "\n\n"
+				// *searchStatus = "\n\n"
 				logger.Debugf(c.Request.Context(), fmt.Sprintf("正式输出前 清空一次内容..."))
 			}
 

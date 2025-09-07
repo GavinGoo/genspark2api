@@ -588,8 +588,111 @@ func createStreamResponse(responseId, modelName string, jsonData []byte, delta m
 	}
 }
 
+func createTempStreamResponse(responseId, modelName string, jsonData []byte, delta model.OpenAIDelta, finishReason *string) model.OpenAIChatCompletionResponse {
+	promptTokens := common.CountTokenText(string(jsonData), modelName)
+	completionTokens := common.CountTokenText(delta.Content, modelName)
+	return model.OpenAIChatCompletionResponse{
+		ID:      responseId,
+		Object:  "chat.completion.chunk",
+		Created: time.Now().Unix(),
+		Model:   modelName,
+		Choices: []model.OpenAIChoice{
+			{
+				Index: 0,
+				Message: model.OpenAIMessage{
+					Role:    delta.Role,
+					Content: delta.Content,
+				},
+				FinishReason: finishReason,
+			},
+		},
+		Usage: model.OpenAIUsage{
+			PromptTokens:     promptTokens,
+			CompletionTokens: completionTokens,
+			TotalTokens:      promptTokens + completionTokens,
+		},
+	}
+}
+
+// handleSearchResults 处理搜索结果并通过SSE发送
+func handleSearchResults(c *gin.Context, event map[string]interface{}, responseId, modelName string, jsonData []byte, searchStatus *string) error {
+	fieldValue, ok := event["field_value"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+
+	// SearchResult 定义单个搜索结果的结构
+	type SearchResult struct {
+		Title   string `json:"title"`
+		Link    string `json:"link"`
+		Snippet string `json:"snippet"`
+	}
+
+	// SearchResponse 定义搜索响应的结构
+	type SearchResponse struct {
+		SearchResults []SearchResult `json:"search_results"`
+	}
+
+	searchResults, ok := fieldValue["search_results"].([]interface{})
+	if !ok {
+		return nil
+	}
+
+	// 创建基础响应
+	// createResponse := func(content string) model.OpenAIChatCompletionResponse {
+	// 	return createStreamResponse(
+	// 		responseId,
+	// 		modelName,
+	// 		jsonData,
+	// 		model.OpenAIDelta{Content: content, Role: "assistant"},
+	// 		nil,
+	// 	)
+	// }
+
+	// 临时输出, 比如搜索过程
+	createTempResponse := func(content string) model.OpenAIChatCompletionResponse {
+		return createTempStreamResponse(
+			responseId,
+			modelName,
+			jsonData,
+			model.OpenAIDelta{Content: content, Role: "assistant"},
+			nil,
+		)
+	}
+
+	for _, result := range searchResults {
+		resultMap, ok := result.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		title, ok := resultMap["title"].(string)
+		if !ok {
+			continue
+		}
+		link, ok := resultMap["link"].(string)
+		if !ok {
+			continue
+		}
+
+		searchContent := fmt.Sprintf("\n> [%s](%s)\n", title, link)
+		logger.Debugf(c.Request.Context(), fmt.Sprintf("搜索引用: %s", searchContent))
+		*searchStatus += searchContent
+		if err := sendSSEvent(c, createTempResponse(*searchStatus)); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 // handleMessageFieldDelta 处理消息字段增量
-func handleMessageFieldDelta(c *gin.Context, event map[string]interface{}, responseId, modelName string, jsonData []byte, searchModel bool) error {
+func handleMessageFieldDelta(c *gin.Context, event map[string]interface{}, responseId, modelName string, jsonData []byte, searchModel bool, searchStatus *string) error {
+	// eventType, ok := event["type"].(string)
+	// if !ok {
+	// 	return nil
+	// }
+
 	fieldName, ok := event["field_name"].(string)
 	if !ok {
 		return nil
@@ -614,7 +717,9 @@ func handleMessageFieldDelta(c *gin.Context, event map[string]interface{}, respo
 	// 联网搜索
 	if searchModel {
 		baseAllowed = baseAllowed ||
-			fieldName == "session_state.search_status_top_bar_data"
+			fieldName == "session_state.search_status_top_bar_data" ||
+			fieldName == "session_state.thinking" ||
+			fieldName == "_updatetime" // 保活
 	}
 
 	if !baseAllowed {
@@ -623,13 +728,30 @@ func handleMessageFieldDelta(c *gin.Context, event map[string]interface{}, respo
 	}
 
 	// 获取 delta 内容
+	var err error
 	var delta string
+	var searching string
+	var searchStatusNew string
 	switch {
 	case (modelName == "o1" || modelName == "o3-mini-high" || modelName == "o3-pro" || modelName == "o4-mini-high") && fieldName == "session_state.answer":
 		delta, _ = event["field_value"].(string)
 	// 联网搜索
 	// case strings.Contains(fieldName, "session_state.streaming_detail_answer"):
 	// 	delta, _ = event["delta"].(string)
+	case searchModel && strings.Contains(fieldName, "session_state.streaming_detail_answer"):
+		delta, _ = event["delta"].(string)
+
+	// 搜索资源
+	// case searchModel && eventType == "message_field" && fieldName == "session_state.search_status_top_bar_data":
+	// 	return handleSearchResults(c, event, responseId, modelName, jsonData)
+
+	// 搜索过程
+	// case searchModel && fieldName == "session_state.thinking":
+	// 	searching, _ = event["field_value"].(string)
+	// 	searchStatusNew = fmt.Sprintf("\n> %s\n", searching)
+	// 	*searchStatus += searchStatusNew
+	// 	logger.Debugf(c.Request.Context(), fmt.Sprintf("浏览 / 分析 搜索结果: %s", *searchStatus))
+
 	default:
 		delta, _ = event["delta"].(string)
 	}
@@ -645,8 +767,18 @@ func handleMessageFieldDelta(c *gin.Context, event map[string]interface{}, respo
 		)
 	}
 
+	// 临时输出, 比如搜索过程
+	createTempResponse := func(content string) model.OpenAIChatCompletionResponse {
+		return createTempStreamResponse(
+			responseId,
+			modelName,
+			jsonData,
+			model.OpenAIDelta{Content: content, Role: "assistant"},
+			nil,
+		)
+	}
+
 	// 发送基础事件
-	var err error
 	if err = sendSSEvent(c, createResponse(delta)); err != nil {
 		return err
 	}
@@ -661,52 +793,43 @@ func handleMessageFieldDelta(c *gin.Context, event map[string]interface{}, respo
 		}
 	}
 
-	// 联网搜索
-	if searchModel && fieldName == "session_state.search_status_top_bar_data" {
-		// 定义搜索结果的结构体
-		type SearchResult struct {
-			Title   string `json:"title"`
-			Link    string `json:"link"`
-			Snippet string `json:"snippet"`
-		}
-
-		type SearchResponse struct {
-			SearchResults []SearchResult `json:"search_results"`
-		}
-
-		fieldValue, ok := event["field_value"].(map[string]interface{})
-		if !ok {
-			// return fmt.Errorf("field_value is not a map")
-			return nil
-		}
-
-		searchResults, ok := fieldValue["search_results"].([]interface{})
-		if !ok {
-			// return fmt.Errorf("search_results is not an array")
-			return nil
-		}
-
-		// 遍历搜索结果
-		for _, result := range searchResults {
-			resultMap, ok := result.(map[string]interface{})
-			if !ok {
-				continue // 跳过无效的结果
+	if searchModel {
+		if delta != "" {
+			if strings.Contains(*searchStatus, "正在浏览") || strings.Contains(*searchStatus, "正在分析") {
+				// 正式输出前 清空一次内容
+				*searchStatus = "\n\n"
+				logger.Debugf(c.Request.Context(), fmt.Sprintf("正式输出前 清空一次内容..."))
 			}
 
-			// 安全地获取标题和链接
-			title, ok := resultMap["title"].(string)
-			if !ok {
-				continue
-			}
-			link, ok := resultMap["link"].(string)
-			if !ok {
-				continue
-			}
+			*searchStatus += delta
+			// err = sendSSEvent(c, createResponse(delta))
+		}
 
-			searchContent := fmt.Sprintf("\n> [%s](%s)\n", title, link)
-			if err := sendSSEvent(c, createResponse(searchContent)); err != nil {
+		// 保活
+		if fieldName == "_updatetime" {
+			logger.Debugf(c.Request.Context(), fmt.Sprintf("搜索模型保活..."))
+			if err = sendSSEvent(c, createTempResponse(*searchStatus)); err != nil {
 				return err
 			}
+		}
+
+		if fieldName == "session_state.search_status_top_bar_data" {
+			if err = handleSearchResults(c, event, responseId, modelName, jsonData, searchStatus); err != nil {
+				return err
+			}
+		}
+
+		if fieldName == "session_state.thinking" {
+			searching, _ = event["field_value"].(string)
+			searchStatusNew = fmt.Sprintf("\n> %s\n", searching)
+			*searchStatus += searchStatusNew
+			logger.Debugf(c.Request.Context(), fmt.Sprintf("浏览 / 分析 搜索结果: %s", searchStatusNew))
+		}
+
+		logger.Debugf(c.Request.Context(), fmt.Sprintf("搜索模型总输出: %s", *searchStatus))
+
+		if err = sendSSEvent(c, createTempResponse(*searchStatus)); err != nil {
+			return err
 		}
 	}
 
@@ -960,6 +1083,7 @@ func handleStreamRequest(c *gin.Context, client cycletls.CycleTLS, cookie string
 			}
 
 			var projectId string
+			var searchStatus string
 			isRateLimit := false
 		SSELoop:
 			for response := range sseChan {
@@ -1014,7 +1138,7 @@ func handleStreamRequest(c *gin.Context, client cycletls.CycleTLS, cookie string
 				}
 
 				// 处理事件流数据
-				if shouldContinue := processStreamData(c, data, &projectId, cookie, responseId, modelName, jsonData, searchModel); !shouldContinue {
+				if shouldContinue := processStreamData(c, data, &projectId, cookie, responseId, modelName, jsonData, searchModel, &searchStatus); !shouldContinue {
 					return false
 				}
 			}
@@ -1118,14 +1242,17 @@ func cheat(requestBody map[string]interface{}, c *gin.Context, cookie string) (m
 }
 
 // 处理流式数据的辅助函数，返回bool表示是否继续处理
-func processStreamData(c *gin.Context, data string, projectId *string, cookie, responseId, model string, jsonData []byte, searchModel bool) bool {
+func processStreamData(c *gin.Context, data string, projectId *string, cookie, responseId, model string, jsonData []byte, searchModel bool, searchStatus *string) bool {
 	data = strings.TrimSpace(data)
 	//if !strings.HasPrefix(data, "data: ") {
 	//	return true
 	//}
 	data = strings.TrimPrefix(data, "data: ")
 	logger.Debug(c.Request.Context(), fmt.Sprintf("processStreamData: %s", data))
-	if !strings.HasPrefix(data, "{\"id\":") && !strings.HasPrefix(data, "{\"message_id\":") && !strings.Contains(data, "session_state.streaming_detail_answer") {
+
+	// && !strings.Contains(data, "session_state.search_status_top_bar_data")	搜索资源内容
+	if !strings.HasPrefix(data, "{\"id\":") && !strings.HasPrefix(data, "{\"message_id\":") &&
+		!strings.Contains(data, "session_state.streaming_detail_answer") && !strings.Contains(data, "session_state.search_status_top_bar_data") && !strings.Contains(data, "session_state.thinking") {
 		logger.Debug(c.Request.Context(), fmt.Sprintf("丢弃数据流: %s", data))
 		return true
 	}
@@ -1145,14 +1272,14 @@ func processStreamData(c *gin.Context, data string, projectId *string, cookie, r
 	case "project_start":
 		*projectId, _ = event["id"].(string)
 	case "message_field":
-		if err := handleMessageFieldDelta(c, event, responseId, model, jsonData, searchModel); err != nil {
+		if err := handleMessageFieldDelta(c, event, responseId, model, jsonData, searchModel, searchStatus); err != nil {
 			logger.Errorf(c.Request.Context(), "handleMessageFieldDelta err: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return false
 		}
 	case "message_field_delta":
 		logger.Debug(c.Request.Context(), "message_field_delta: ")
-		if err := handleMessageFieldDelta(c, event, responseId, model, jsonData, searchModel); err != nil {
+		if err := handleMessageFieldDelta(c, event, responseId, model, jsonData, searchModel, searchStatus); err != nil {
 			logger.Errorf(c.Request.Context(), "handleMessageFieldDelta err: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return false

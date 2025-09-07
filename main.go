@@ -9,9 +9,10 @@ import (
 	"genspark2api/middleware"
 	"genspark2api/router"
 	"genspark2api/yescaptcha"
-	"github.com/gin-gonic/gin"
 	"os"
 	"strconv"
+
+	"github.com/gin-gonic/gin"
 )
 
 func main() {
@@ -45,6 +46,7 @@ func main() {
 	if port == "" {
 		port = strconv.Itoa(*common.Port)
 	}
+	logger.SysLog("HTTP server port: " + port)
 
 	if config.DebugEnabled {
 		logger.SysLog("running in DEBUG mode.")

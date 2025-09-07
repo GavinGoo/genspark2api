@@ -639,19 +639,8 @@ func handleSearchResults(c *gin.Context, event map[string]interface{}, responseI
 	}
 
 	// 创建基础响应
-	// createResponse := func(content string) model.OpenAIChatCompletionResponse {
-	// 	return createStreamResponse(
-	// 		responseId,
-	// 		modelName,
-	// 		jsonData,
-	// 		model.OpenAIDelta{Content: content, Role: "assistant"},
-	// 		nil,
-	// 	)
-	// }
-
-	// 临时输出, 比如搜索过程
-	createTempResponse := func(content string) model.OpenAIChatCompletionResponse {
-		return createTempStreamResponse(
+	createResponse := func(content string) model.OpenAIChatCompletionResponse {
+		return createStreamResponse(
 			responseId,
 			modelName,
 			jsonData,
@@ -659,6 +648,17 @@ func handleSearchResults(c *gin.Context, event map[string]interface{}, responseI
 			nil,
 		)
 	}
+
+	// 临时输出, 比如搜索过程
+	// createTempResponse := func(content string) model.OpenAIChatCompletionResponse {
+	// 	return createTempStreamResponse(
+	// 		responseId,
+	// 		modelName,
+	// 		jsonData,
+	// 		model.OpenAIDelta{Content: content, Role: "assistant"},
+	// 		nil,
+	// 	)
+	// }
 
 	for _, result := range searchResults {
 		resultMap, ok := result.(map[string]interface{})
@@ -675,11 +675,11 @@ func handleSearchResults(c *gin.Context, event map[string]interface{}, responseI
 			continue
 		}
 
-		searchContent := fmt.Sprintf("\n> [%s](%s)\n", title, link)
+		searchContent := fmt.Sprintf("> [%s](%s) \n > \n  ", title, link)
 		if !strings.Contains(*searchStatus, searchContent) {
 			logger.Debugf(c.Request.Context(), fmt.Sprintf("搜索引用: %s", searchContent))
 			*searchStatus += searchContent
-			if err := sendSSEvent(c, createTempResponse(*searchStatus)); err != nil {
+			if err := sendSSEvent(c, createResponse(searchContent)); err != nil {
 				return err
 			}
 		}
@@ -770,15 +770,15 @@ func handleMessageFieldDelta(c *gin.Context, event map[string]interface{}, respo
 	}
 
 	// 临时输出, 比如搜索过程
-	createTempResponse := func(content string) model.OpenAIChatCompletionResponse {
-		return createTempStreamResponse(
-			responseId,
-			modelName,
-			jsonData,
-			model.OpenAIDelta{Content: content, Role: "assistant"},
-			nil,
-		)
-	}
+	// createTempResponse := func(content string) model.OpenAIChatCompletionResponse {
+	// 	return createTempStreamResponse(
+	// 		responseId,
+	// 		modelName,
+	// 		jsonData,
+	// 		model.OpenAIDelta{Content: content, Role: "assistant"},
+	// 		nil,
+	// 	)
+	// }
 
 	// 发送基础事件
 	if err = sendSSEvent(c, createResponse(delta)); err != nil {
@@ -796,23 +796,27 @@ func handleMessageFieldDelta(c *gin.Context, event map[string]interface{}, respo
 	}
 
 	if searchModel {
-		if delta != "" {
-			if strings.Contains(*searchStatus, "正在浏览") || strings.Contains(*searchStatus, "正在分析") {
-				// 正式输出前 清空一次内容
-				// *searchStatus = "\n\n"
-				logger.Debugf(c.Request.Context(), fmt.Sprintf("正式输出前 清空一次内容..."))
-			}
+		// if delta != "" {
+		// 	// if strings.Contains(*searchStatus, "正在浏览") || strings.Contains(*searchStatus, "正在分析") {
+		// 	// 	// 正式输出前 清空一次内容
+		// 	// 	// *searchStatus = "\n\n"
+		// 	// 	logger.Debugf(c.Request.Context(), fmt.Sprintf("正式输出前 清空一次内容..."))
+		// 	// }
 
-			*searchStatus += delta
-			// err = sendSSEvent(c, createResponse(delta))
-		}
+		// 	// *searchStatus += delta
+		// 	err = sendSSEvent(c, createResponse(delta))
+		// 	return err
+		// }
 
 		// 保活
 		if fieldName == "_updatetime" {
 			logger.Debugf(c.Request.Context(), fmt.Sprintf("搜索模型保活..."))
-			if err = sendSSEvent(c, createTempResponse(*searchStatus)); err != nil {
-				return err
-			}
+			// if err = sendSSEvent(c, createTempResponse(*searchStatus)); err != nil {
+			// 	return err
+			// }
+			err = sendSSEvent(c, createResponse(delta))
+			return err
+
 		}
 
 		if fieldName == "session_state.search_status_top_bar_data" {
@@ -823,16 +827,21 @@ func handleMessageFieldDelta(c *gin.Context, event map[string]interface{}, respo
 
 		if fieldName == "session_state.thinking" {
 			searching, _ = event["field_value"].(string)
-			searchStatusNew = fmt.Sprintf("\n> %s\n", searching)
-			*searchStatus += searchStatusNew
+			searchStatusNew = fmt.Sprintf("\n> %s\n\n", searching)
+			// *searchStatus += searchStatusNew
 			logger.Debugf(c.Request.Context(), fmt.Sprintf("浏览 / 分析 搜索结果: %s", searchStatusNew))
-		}
-
-		logger.Debugf(c.Request.Context(), fmt.Sprintf("搜索模型总输出: %s", *searchStatus))
-
-		if err = sendSSEvent(c, createTempResponse(*searchStatus)); err != nil {
+			err = sendSSEvent(c, createResponse(searchStatusNew))
 			return err
 		}
+
+		// logger.Debugf(c.Request.Context(), fmt.Sprintf("搜索模型总输出: %s", *searchStatus))
+
+		// if err = sendSSEvent(c, createTempResponse(*searchStatus)); err != nil {
+		// 	return err
+		// }
+		// if err = sendSSEvent(c, createResponse(*searchStatus)); err != nil {
+		// 	return err
+		// }
 	}
 
 	return err
@@ -887,6 +896,7 @@ func sendSSEvent(c *gin.Context, response model.OpenAIChatCompletionResponse) er
 		logger.Errorf(c.Request.Context(), "Failed to marshal response: %v", err)
 		return err
 	}
+	logger.Debug(c.Request.Context(), fmt.Sprintf("SSEvent: %s", string(jsonResp)))
 	c.SSEvent("", " "+string(jsonResp))
 	c.Writer.Flush()
 	return nil
